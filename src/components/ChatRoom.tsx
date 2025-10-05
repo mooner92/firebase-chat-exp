@@ -15,6 +15,17 @@ const colors = [
   '#F8BBD9', '#A8E6CF', '#FFD3A5', '#FD6A9A', '#C7CEEA'
 ]
 
+// Firebase 메시지 타입 정의
+interface FirebaseMessage {
+  text: string
+  timestamp: number
+  user: {
+    id: string
+    name: string
+    color: string
+  }
+}
+
 export default function ChatRoom() {
   const [messages, setMessages] = useState<MessageType[]>([])
   const [currentUser, setCurrentUser] = useState({
@@ -33,8 +44,8 @@ export default function ChatRoom() {
         const data = await response.json()
         const ip = data.ip
         // Extract first 6 characters of IP
-        return `익명${ip.substring(0, 7)}`
-      } catch (error) {
+        return `익명${ip.substring(0, 6)}`
+      } catch {
         // Fallback to random number if IP fetch fails
         return `익명${Math.floor(Math.random() * 1000)}`
       }
@@ -66,7 +77,7 @@ export default function ChatRoom() {
       try {
         const data = snapshot.val()
         if (data) {
-          const messageList: MessageType[] = Object.entries(data).map(([id, message]: [string, any]) => ({
+          const messageList: MessageType[] = Object.entries(data).map(([id, message]: [string, FirebaseMessage]) => ({
             id,
             ...message,
             timestamp: message.timestamp || Date.now()
