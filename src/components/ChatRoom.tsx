@@ -77,11 +77,14 @@ export default function ChatRoom() {
       try {
         const data = snapshot.val()
         if (data) {
-          const messageList: MessageType[] = Object.entries(data).map(([id, message]: [string, FirebaseMessage]) => ({
-            id,
-            ...message,
-            timestamp: message.timestamp || Date.now()
-          }))
+          const messageList: MessageType[] = Object.entries(data).map(([id, message]) => {
+            const firebaseMessage = message as FirebaseMessage
+            return {
+              id,
+              ...firebaseMessage,
+              timestamp: firebaseMessage.timestamp || Date.now()
+            }
+          })
           setMessages(messageList.sort((a, b) => a.timestamp - b.timestamp))
         } else {
           setMessages([])
