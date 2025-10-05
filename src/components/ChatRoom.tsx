@@ -87,13 +87,13 @@ export default function ChatRoom() {
           setMessages([])
         }
         setConnectionStatus('connected')
-      } catch (error) {
-        console.error('메시지 로드 실패:', error)
+      } catch {
+        console.error('메시지 로드 실패')
         setConnectionStatus('disconnected')
       }
       setIsLoading(false)
-    }, (error) => {
-      console.error('데이터베이스 연결 실패:', error)
+    }, () => {
+      console.error('데이터베이스 연결 실패')
       setConnectionStatus('disconnected')
       setIsLoading(false)
     })
