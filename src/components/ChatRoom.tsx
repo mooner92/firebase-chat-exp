@@ -30,9 +30,9 @@ export default function ChatRoom() {
         const response = await fetch('https://api.ipify.org?format=json')
         const data = await response.json()
         const ip = data.ip
-        return `익명${ip.substring(0, 6)}`
+        return `익명${ip.substring(ip.length - 4)}`
       } catch {
-        return `익명${Math.floor(Math.random() * 1000)}`
+        return `익명${Math.floor(Math.random() * 10000)}`
       }
     }
 
@@ -46,13 +46,14 @@ export default function ChatRoom() {
         userName = await getIPBasedUsername()
         userColor = colors[Math.floor(Math.random() * colors.length)]
         
-        // Supabase에 사용자 저장
+        // Supabase에 사용자 저장 (핵심 수정: 에러 처리 개선)
         const { error } = await supabase
           .from('users')
           .insert({ id: userId, name: userName, color: userColor })
         
         if (error && !error.message.includes('duplicate key')) {
           console.error('사용자 저장 실패:', error)
+          // 여기서 return하지 말고 계속 진행
         }
         
         localStorage.setItem('chatUserId', userId)
@@ -60,7 +61,7 @@ export default function ChatRoom() {
         localStorage.setItem('chatUserColor', userColor)
       } else {
         // 기존 사용자 정보 확인
-        const { data: userData, error } = await supabase
+        const { data: userData } = await supabase
           .from('users')
           .select('name, color')
           .eq('id', userId)
@@ -71,6 +72,15 @@ export default function ChatRoom() {
           userColor = userData.color
           localStorage.setItem('chatUserName', userName)
           localStorage.setItem('chatUserColor', userColor)
+        } else {
+          // 사용자가 DB에 없으면 다시 생성
+          const { error } = await supabase
+            .from('users')
+            .insert({ id: userId, name: userName, color: userColor })
+          
+          if (error && !error.message.includes('duplicate key')) {
+            console.error('사용자 재생성 실패:', error)
+          }
         }
       }
     
@@ -79,32 +89,41 @@ export default function ChatRoom() {
 
     const loadMessages = async () => {
       try {
-        // JOIN을 사용하여 사용자 정보와 함께 메시지 가져오기
-        const { data, error } = await supabase
+        // 메시지와 사용자 정보를 별도로 가져와서 조합
+        const { data: messagesData, error: messagesError } = await supabase
           .from('messages')
-          .select(`
-            *,
-            user:users(name, color)
-          `)
+          .select('*')
           .order('created_at', { ascending: true })
         
-        if (error) throw error
+        if (messagesError) throw messagesError
         
-        const messageList = data?.map(msg => ({
-          id: msg.id,
-          text: msg.text,
-          timestamp: msg.timestamp,
-          user_id: msg.user_id,
-          created_at: msg.created_at,
-          user: {
-            id: msg.user_id,
-            name: msg.user.name,
-            color: msg.user.color
+        // 사용자 정보도 가져오기
+        const { data: usersData, error: usersError } = await supabase
+          .from('users')
+          .select('*')
+        
+        if (usersError) throw usersError
+        
+        // 메시지와 사용자 정보 조합
+        const messageList = messagesData?.map(msg => {
+          const user = usersData?.find(u => u.id === msg.user_id)
+          return {
+            id: msg.id,
+            text: msg.text,
+            timestamp: msg.timestamp,
+            user_id: msg.user_id,
+            created_at: msg.created_at,
+            user: {
+              id: msg.user_id,
+              name: user?.name || 'Unknown',
+              color: user?.color || '#000000'
+            }
           }
-        })) || []
+        }) || []
         
         setMessages(messageList)
         setConnectionStatus('connected')
+        console.log('메시지 로드 완료:', messageList.length, '개')
       } catch (error) {
         console.error('메시지 로드 실패:', error)
         setConnectionStatus('disconnected')
@@ -114,7 +133,7 @@ export default function ChatRoom() {
 
     const setupRealtimeSubscription = () => {
       const channel = supabase
-        .channel('messages')
+        .channel('public:messages')
         .on('postgres_changes', 
           { 
             event: 'INSERT', 
@@ -122,30 +141,38 @@ export default function ChatRoom() {
             table: 'messages' 
           }, 
           async (payload) => {
-            // 새 메시지가 추가되면 사용자 정보와 함께 가져오기
-            const { data: userData } = await supabase
-              .from('users')
-              .select('name, color')
-              .eq('id', payload.new.user_id)
-              .single()
-            
-            const newMessage: MessageType = {
-              id: payload.new.id,
-              text: payload.new.text,
-              timestamp: payload.new.timestamp,
-              user_id: payload.new.user_id,
-              created_at: payload.new.created_at,
-              user: {
-                id: payload.new.user_id,
-                name: userData?.name || 'Unknown',
-                color: userData?.color || '#000000'
+            console.log('새 메시지 수신:', payload)
+            try {
+              // 새 메시지가 추가되면 사용자 정보와 함께 가져오기
+              const { data: userData } = await supabase
+                .from('users')
+                .select('name, color')
+                .eq('id', payload.new.user_id)
+                .single()
+              
+              const newMessage: MessageType = {
+                id: payload.new.id,
+                text: payload.new.text,
+                timestamp: payload.new.timestamp,
+                user_id: payload.new.user_id,
+                created_at: payload.new.created_at,
+                user: {
+                  id: payload.new.user_id,
+                  name: userData?.name || 'Unknown',
+                  color: userData?.color || '#000000'
+                }
               }
+              
+              setMessages(prev => [...prev, newMessage])
+            } catch (error) {
+              console.error('실시간 메시지 처리 실패:', error)
+              // 에러가 발생해도 메시지 리스트를 다시 로드
+              loadMessages()
             }
-            
-            setMessages(prev => [...prev, newMessage])
           }
         )
         .subscribe((status) => {
+          console.log('구독 상태:', status)
           if (status === 'SUBSCRIBED') {
             setConnectionStatus('connected')
           } else if (status === 'CHANNEL_ERROR') {
@@ -154,6 +181,7 @@ export default function ChatRoom() {
         })
 
       return () => {
+        console.log('구독 해제')
         supabase.removeChannel(channel)
       }
     }

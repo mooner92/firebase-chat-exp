@@ -19,7 +19,31 @@ export default function MessageInput({ currentUser }: MessageInputProps) {
     if (!message.trim()) return
 
     try {
-      // user_id만 저장
+      // 핵심 수정: 메시지 전송 전 사용자 존재 확인 및 생성
+      const { data: userExists } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', currentUser.id)
+        .single()
+
+      if (!userExists) {
+        // 사용자가 없으면 먼저 생성
+        const { error: userError } = await supabase
+          .from('users')
+          .insert({
+            id: currentUser.id,
+            name: currentUser.name,
+            color: currentUser.color
+          })
+
+        if (userError && !userError.message.includes('duplicate key')) {
+          console.error('사용자 생성 실패:', userError)
+          alert('사용자 정보 생성에 실패했습니다. 페이지를 새로고침해주세요.')
+          return
+        }
+      }
+
+      // 메시지 전송
       const { error } = await supabase
         .from('messages')
         .insert({
@@ -33,7 +57,6 @@ export default function MessageInput({ currentUser }: MessageInputProps) {
       setMessage('')
     } catch (error) {
       console.error('메시지 전송 실패:', error)
-      console.error('Error details:', JSON.stringify(error, null, 2))
       alert(`메시지 전송에 실패했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`)
     }
   }
