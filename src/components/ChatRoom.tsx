@@ -2,12 +2,10 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { ref, onValue, off } from 'firebase/database'
-import { database } from '@/lib/firebase'
+import { supabase } from '@/lib/supabase'
 import { Message as MessageType } from '@/types/chat'
 import MessageList from './MessageList'
 import MessageInput from './MessageInput'
-import { v4 as uuidv4 } from 'uuid'
 
 const colors = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
@@ -15,16 +13,6 @@ const colors = [
   '#F8BBD9', '#A8E6CF', '#FFD3A5', '#FD6A9A', '#C7CEEA'
 ]
 
-// Firebase 메시지 타입 정의
-interface FirebaseMessage {
-  text: string
-  timestamp: number
-  user: {
-    id: string
-    name: string
-    color: string
-  }
-}
 
 export default function ChatRoom() {
   const [messages, setMessages] = useState<MessageType[]>([])
@@ -37,16 +25,13 @@ export default function ChatRoom() {
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
 
   useEffect(() => {
-    // 사용자 정보 초기화
     const getIPBasedUsername = async () => {
       try {
         const response = await fetch('https://api.ipify.org?format=json')
         const data = await response.json()
         const ip = data.ip
-        // Extract first 6 characters of IP
         return `익명${ip.substring(0, 6)}`
       } catch {
-        // Fallback to random number if IP fetch fails
         return `익명${Math.floor(Math.random() * 1000)}`
       }
     }
@@ -57,51 +42,127 @@ export default function ChatRoom() {
       let userColor = localStorage.getItem('chatUserColor') || ''
     
       if (!userId) {
-        userId = uuidv4()
+        userId = crypto.randomUUID()
         userName = await getIPBasedUsername()
         userColor = colors[Math.floor(Math.random() * colors.length)]
+        
+        // Supabase에 사용자 저장
+        const { error } = await supabase
+          .from('users')
+          .insert({ id: userId, name: userName, color: userColor })
+        
+        if (error && !error.message.includes('duplicate key')) {
+          console.error('사용자 저장 실패:', error)
+        }
         
         localStorage.setItem('chatUserId', userId)
         localStorage.setItem('chatUserName', userName)
         localStorage.setItem('chatUserColor', userColor)
+      } else {
+        // 기존 사용자 정보 확인
+        const { data: userData, error } = await supabase
+          .from('users')
+          .select('name, color')
+          .eq('id', userId)
+          .single()
+        
+        if (userData) {
+          userName = userData.name
+          userColor = userData.color
+          localStorage.setItem('chatUserName', userName)
+          localStorage.setItem('chatUserColor', userColor)
+        }
       }
     
       setCurrentUser({ id: userId, name: userName, color: userColor })
     }
 
-    initializeUser()
-
-    // 실시간 메시지 리스너
-    const messagesRef = ref(database, 'messages')
-    const unsubscribe = onValue(messagesRef, (snapshot) => {
+    const loadMessages = async () => {
       try {
-        const data = snapshot.val()
-        if (data) {
-          const messageList: MessageType[] = Object.entries(data).map(([id, message]) => {
-            const firebaseMessage = message as FirebaseMessage
-            return {
-              id,
-              ...firebaseMessage,
-              timestamp: firebaseMessage.timestamp || Date.now()
-            }
-          })
-          setMessages(messageList.sort((a, b) => a.timestamp - b.timestamp))
-        } else {
-          setMessages([])
-        }
+        // JOIN을 사용하여 사용자 정보와 함께 메시지 가져오기
+        const { data, error } = await supabase
+          .from('messages')
+          .select(`
+            *,
+            user:users(name, color)
+          `)
+          .order('created_at', { ascending: true })
+        
+        if (error) throw error
+        
+        const messageList = data?.map(msg => ({
+          id: msg.id,
+          text: msg.text,
+          timestamp: msg.timestamp,
+          user_id: msg.user_id,
+          created_at: msg.created_at,
+          user: {
+            id: msg.user_id,
+            name: msg.user.name,
+            color: msg.user.color
+          }
+        })) || []
+        
+        setMessages(messageList)
         setConnectionStatus('connected')
-      } catch {
-        console.error('메시지 로드 실패')
+      } catch (error) {
+        console.error('메시지 로드 실패:', error)
         setConnectionStatus('disconnected')
       }
       setIsLoading(false)
-    }, () => {
-      console.error('데이터베이스 연결 실패')
-      setConnectionStatus('disconnected')
-      setIsLoading(false)
-    })
+    }
 
-    return () => off(messagesRef, 'value', unsubscribe)
+    const setupRealtimeSubscription = () => {
+      const channel = supabase
+        .channel('messages')
+        .on('postgres_changes', 
+          { 
+            event: 'INSERT', 
+            schema: 'public', 
+            table: 'messages' 
+          }, 
+          async (payload) => {
+            // 새 메시지가 추가되면 사용자 정보와 함께 가져오기
+            const { data: userData } = await supabase
+              .from('users')
+              .select('name, color')
+              .eq('id', payload.new.user_id)
+              .single()
+            
+            const newMessage: MessageType = {
+              id: payload.new.id,
+              text: payload.new.text,
+              timestamp: payload.new.timestamp,
+              user_id: payload.new.user_id,
+              created_at: payload.new.created_at,
+              user: {
+                id: payload.new.user_id,
+                name: userData?.name || 'Unknown',
+                color: userData?.color || '#000000'
+              }
+            }
+            
+            setMessages(prev => [...prev, newMessage])
+          }
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            setConnectionStatus('connected')
+          } else if (status === 'CHANNEL_ERROR') {
+            setConnectionStatus('disconnected')
+          }
+        })
+
+      return () => {
+        supabase.removeChannel(channel)
+      }
+    }
+
+    initializeUser()
+    loadMessages()
+    const cleanup = setupRealtimeSubscription()
+
+    return cleanup
   }, [])
 
   const getConnectionStatusText = () => {
